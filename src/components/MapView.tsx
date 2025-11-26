@@ -4,9 +4,11 @@ import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { LatLng, Segment } from "../state/types.ts";
 import type { Step } from "../state/useRouteDesigner.ts";
+
 maplibregl.setWorkerUrl(
   `${process.env.PUBLIC_URL}/maplibre-gl-csp-worker.js`
 );
+
 
 type PreviewSeg = {
   id: string;
