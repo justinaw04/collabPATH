@@ -83,8 +83,10 @@ export function MapView({
 
     map.addControl(new maplibregl.NavigationControl(), "bottom-right");
 
+    // log maplibre internal errors in prod
     map.on("error", (e) => console.error("MAP ERROR:", e.error));
 
+    // bump tick when style becomes ready / changes
     map.on("load", () => setStyleTick((t) => t + 1));
     map.on("styledata", () => setStyleTick((t) => t + 1));
 
@@ -107,7 +109,7 @@ export function MapView({
     mapRef.current.easeTo({ center: [center.lng, center.lat], duration: 500 });
   }, [center]);
 
-  // ---------- UPSERT HELPERS ----------
+  // ---------- UPSERT HELPERS (WITH PROD DIAGNOSTICS) ----------
   const upsertLine = useCallback(
     (id: string, points: LatLng[], color: string, width = 4, opacity = 1) => {
       const map = mapRef.current;
@@ -122,28 +124,42 @@ export function MapView({
       };
 
       const src = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
+
       if (src) {
         src.setData(data);
       } else {
-        map.addSource(id, { type: "geojson", data });
+        try {
+          map.addSource(id, { type: "geojson", data });
+        } catch (e) {
+          console.error("ADD SOURCE FAILED", id, e);
+          return;
+        }
       }
 
       if (!map.getLayer(id)) {
-        map.addLayer({
-          id,
-          type: "line",
-          source: id,
-          paint: {
-            "line-color": color,
-            "line-width": width,
-            "line-opacity": opacity,
-          },
-        });
+        try {
+          map.addLayer({
+            id,
+            type: "line",
+            source: id,
+            paint: {
+              "line-color": color,
+              "line-width": width,
+              "line-opacity": opacity,
+            },
+          });
+        } catch (e) {
+          console.error("ADD LAYER FAILED", id, e);
+          return;
+        }
       } else {
-        // keep paint updated if needed
-        map.setPaintProperty(id, "line-color", color);
-        map.setPaintProperty(id, "line-width", width);
-        map.setPaintProperty(id, "line-opacity", opacity);
+        try {
+          map.setPaintProperty(id, "line-color", color);
+          map.setPaintProperty(id, "line-width", width);
+          map.setPaintProperty(id, "line-opacity", opacity);
+        } catch (e) {
+          console.error("SET PAINT FAILED", id, e);
+        }
       }
     },
     []
@@ -166,48 +182,67 @@ export function MapView({
       };
 
       const src = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
+
       if (src) {
         src.setData(data);
       } else {
-        map.addSource(id, { type: "geojson", data });
+        try {
+          map.addSource(id, { type: "geojson", data });
+        } catch (e) {
+          console.error("ADD SOURCE FAILED", id, e);
+          return;
+        }
       }
 
       const circlesId = `${id}-circles`;
       const labelsId = `${id}-labels`;
 
       if (!map.getLayer(circlesId)) {
-        map.addLayer({
-          id: circlesId,
-          type: "circle",
-          source: id,
-          paint: {
-            "circle-radius": 6,
-            "circle-color": color,
-            "circle-stroke-color": "#ffffff",
-            "circle-stroke-width": 2,
-          },
-        });
+        try {
+          map.addLayer({
+            id: circlesId,
+            type: "circle",
+            source: id,
+            paint: {
+              "circle-radius": 6,
+              "circle-color": color,
+              "circle-stroke-color": "#ffffff",
+              "circle-stroke-width": 2,
+            },
+          });
+        } catch (e) {
+          console.error("ADD LAYER FAILED", circlesId, e);
+          return;
+        }
       } else {
-        map.setPaintProperty(circlesId, "circle-color", color);
+        try {
+          map.setPaintProperty(circlesId, "circle-color", color);
+        } catch (e) {
+          console.error("SET PAINT FAILED", circlesId, e);
+        }
       }
 
       if (!map.getLayer(labelsId)) {
-        map.addLayer({
-          id: labelsId,
-          type: "symbol",
-          source: id,
-          layout: {
-            "text-field": ["get", "index"],
-            "text-size": 12,
-            "text-offset": [0, -1.2],
-            "text-anchor": "bottom",
-          },
-          paint: {
-            "text-color": "#111827",
-            "text-halo-color": "#ffffff",
-            "text-halo-width": 1.5,
-          },
-        });
+        try {
+          map.addLayer({
+            id: labelsId,
+            type: "symbol",
+            source: id,
+            layout: {
+              "text-field": ["get", "index"],
+              "text-size": 12,
+              "text-offset": [0, -1.2],
+              "text-anchor": "bottom",
+            },
+            paint: {
+              "text-color": "#111827",
+              "text-halo-color": "#ffffff",
+              "text-halo-width": 1.5,
+            },
+          });
+        } catch (e) {
+          console.error("ADD LAYER FAILED", labelsId, e);
+        }
       }
     },
     []
@@ -218,7 +253,7 @@ export function MapView({
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
 
-    // draft
+    // draft line
     if (mode === "drawing") {
       upsertLine("draft-line", draftPoints, "#2563eb", 4, 1);
     }
@@ -228,11 +263,12 @@ export function MapView({
       upsertLine("route-line", routePoints, "#a855f7", 5, 0.7);
     }
 
-    // points
+    // numbered points
     const ptsToLabel =
       mode === "drawing" ? draftPoints : routePoints ?? [];
     const showLabels =
       mode === "splitting" || mode === "segments" || mode === "saved";
+
     if (ptsToLabel.length) {
       upsertPoints("route-points", ptsToLabel, "#111827");
       if (map.getLayer("route-points-labels")) {
@@ -244,7 +280,7 @@ export function MapView({
       }
     }
 
-    // preview segments
+    // preview segments while splitting
     if (mode === "splitting" && routePoints) {
       previewSegments.forEach((ps) => {
         const segPts = routePoints.slice(ps.startIndex, ps.endIndex + 1);
@@ -277,13 +313,7 @@ export function MapView({
 
     // active segment highlight
     if (mode === "tracking") {
-      upsertLine(
-        "active-seg",
-        activeSegmentPoints,
-        "#a855f7",
-        8,
-        1
-      );
+      upsertLine("active-seg", activeSegmentPoints, "#a855f7", 8, 1);
     }
 
     // tracking overlay
