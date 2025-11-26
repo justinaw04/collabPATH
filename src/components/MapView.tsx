@@ -1,5 +1,5 @@
 // src/components/MapView.tsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { LatLng, Segment } from "../state/types.ts";
@@ -30,21 +30,19 @@ type Props = {
   onMapClick?: (p: LatLng) => void;
 };
 
-export function MapView(props: Props) {
-  const {
-    center,
-    userLocation,
-    searchCenter,
-    draftPoints,
-    routePoints,
-    segments,
-    previewSegments,
-    trackingPath,
-    activeSegmentPoints,
-    mode,
-    onMapClick,
-  } = props;
-
+export function MapView({
+  center,
+  userLocation,
+  searchCenter,
+  draftPoints,
+  routePoints,
+  segments,
+  previewSegments,
+  trackingPath,
+  activeSegmentPoints,
+  mode,
+  onMapClick,
+}: Props) {
   const mapRef = useRef<Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -53,7 +51,7 @@ export function MapView(props: Props) {
 
   const personMarkerRef = useRef<maplibregl.Marker | null>(null);
 
-  // forces redraw after style is truly ready in prod
+  // triggers redraw when style changes
   const [styleTick, setStyleTick] = useState(0);
 
   useEffect(() => {
@@ -85,14 +83,11 @@ export function MapView(props: Props) {
 
     map.addControl(new maplibregl.NavigationControl(), "bottom-right");
 
-    // debug prod errors
     map.on("error", (e) => console.error("MAP ERROR:", e.error));
 
     // bump tick when style becomes ready / changes
     map.on("load", () => setStyleTick((t) => t + 1));
-    map.on("styledata", () => {
-      if (map.isStyleLoaded()) setStyleTick((t) => t + 1);
-    });
+    map.on("styledata", () => setStyleTick((t) => t + 1));
 
     map.on("click", (e) => {
       const m = modeRef.current;
@@ -113,18 +108,17 @@ export function MapView(props: Props) {
     mapRef.current.easeTo({ center: [center.lng, center.lat], duration: 500 });
   }, [center]);
 
-  // ---------- HARD REDRAW ALL CUSTOM LAYERS ----------
-  useEffect(() => {
+  // ---------- DRAW OVERLAYS (HARD REDRAW) ----------
+  const drawOverlays = useCallback(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
+    if (!map) return;
 
-    // 1) remove any custom layers/sources we might have added before
+    // remove any custom layers/sources before redraw
     const removeIfExists = (id: string) => {
       if (map.getLayer(id)) map.removeLayer(id);
       if (map.getSource(id)) map.removeSource(id);
     };
 
-    // known fixed ids
     const fixedIds = [
       "draft-line",
       "route-line",
@@ -138,25 +132,18 @@ export function MapView(props: Props) {
     ];
     fixedIds.forEach(removeIfExists);
 
-    // preview + segment layers are dynamic prefixes
+    // dynamic prefixes
     map.getStyle().layers?.forEach((l) => {
-      if (
-        l.id.startsWith("preview-") ||
-        l.id.startsWith("seg-")
-      ) {
+      if (l.id.startsWith("preview-") || l.id.startsWith("seg-")) {
         removeIfExists(l.id);
       }
     });
     Object.keys(map.getStyle().sources).forEach((sid) => {
-      if (
-        sid.startsWith("preview-") ||
-        sid.startsWith("seg-")
-      ) {
+      if (sid.startsWith("preview-") || sid.startsWith("seg-")) {
         removeIfExists(sid);
       }
     });
 
-    // 2) helpers to add fresh layers
     const addLine = (
       id: string,
       points: LatLng[],
@@ -166,13 +153,11 @@ export function MapView(props: Props) {
     ) => {
       if (points.length < 2) return;
       const coords = points.map((p) => [p.lng, p.lat]);
-
       const data: GeoJSON.Feature<GeoJSON.LineString> = {
         type: "Feature",
         geometry: { type: "LineString", coordinates: coords },
         properties: {},
       };
-
       map.addSource(id, { type: "geojson", data });
       map.addLayer({
         id,
@@ -232,8 +217,6 @@ export function MapView(props: Props) {
       });
     };
 
-    // 3) redraw in correct order
-
     // draft line
     if (mode === "drawing") {
       addLine("draft-line", draftPoints, "#2563eb", 4, 1);
@@ -244,19 +227,18 @@ export function MapView(props: Props) {
       addLine("route-line", routePoints, "#a855f7", 5, 0.7);
     }
 
-    // numbered points when relevant
-    const ptsToLabel =
-      mode === "drawing" ? draftPoints : routePoints ?? [];
+    // numbered points
+    const ptsToLabel = mode === "drawing" ? draftPoints : routePoints ?? [];
     const showLabels =
       mode === "splitting" || mode === "segments" || mode === "saved";
     if (showLabels || mode === "drawing") {
       addPoints("route-points", ptsToLabel, "#111827");
-      if (!showLabels) {
+      if (!showLabels && map.getLayer("route-points-labels")) {
         map.setLayoutProperty("route-points-labels", "visibility", "none");
       }
     }
 
-    // preview segments while splitting
+    // preview segments
     if (mode === "splitting" && routePoints) {
       previewSegments.forEach((ps) => {
         const segPts = routePoints.slice(ps.startIndex, ps.endIndex + 1);
@@ -268,7 +250,9 @@ export function MapView(props: Props) {
     if (routePoints) {
       segments.forEach((s, idx) => {
         const segPts =
-          s.status === "completed" && s.completedPath && s.completedPath.length > 1
+          s.status === "completed" &&
+          s.completedPath &&
+          s.completedPath.length > 1
             ? s.completedPath
             : routePoints.slice(s.startIndex, s.endIndex + 1);
 
@@ -285,12 +269,12 @@ export function MapView(props: Props) {
       });
     }
 
-    // active segment highlight in tracking
+    // active segment highlight
     if (mode === "tracking") {
       addLine("active-seg", activeSegmentPoints, "#a855f7", 8, 1);
     }
 
-    // live tracking overlay
+    // tracking overlay
     if (mode === "tracking") {
       addLine("tracking-line", trackingPath, "#2563eb", 4, 1);
     }
@@ -330,7 +314,6 @@ export function MapView(props: Props) {
           el.textContent = "🧍";
           el.style.fontSize = "22px";
           el.style.transform = "translate(-50%, -50%)";
-
           personMarkerRef.current = new maplibregl.Marker({ element: el })
             .setLngLat([userLocation.lng, userLocation.lat])
             .addTo(map);
@@ -370,7 +353,6 @@ export function MapView(props: Props) {
       }
     }
   }, [
-    styleTick,
     mode,
     draftPoints,
     routePoints,
@@ -381,6 +363,30 @@ export function MapView(props: Props) {
     searchCenter,
     userLocation,
   ]);
+
+  // ✅ retry until style is ready, THEN draw
+  useEffect(() => {
+    let cancelled = false;
+
+    const tryDraw = () => {
+      const map = mapRef.current;
+      if (cancelled || !map) return;
+
+      if (!map.isStyleLoaded()) {
+        setTimeout(tryDraw, 200); // keep retrying
+        return;
+      }
+
+      // style ready → hard redraw overlays
+      drawOverlays();
+    };
+
+    tryDraw();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [styleTick, drawOverlays]);
 
   return <div ref={containerRef} className="w-full h-full z-0" />;
 }
