@@ -1,5 +1,5 @@
 // src/components/MapView.tsx
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { LatLng, Segment } from "../state/types.ts";
@@ -16,29 +16,35 @@ type Props = {
   center: LatLng | null;
   userLocation: LatLng | null;
   searchCenter: LatLng | null;
+
   draftPoints: LatLng[];
   routePoints: LatLng[] | null;
+
   segments: Segment[];
   previewSegments: PreviewSeg[];
+
   trackingPath: LatLng[];
   activeSegmentPoints: LatLng[];
+
   mode: Step;
   onMapClick?: (p: LatLng) => void;
 };
 
-export function MapView({
-  center,
-  userLocation,
-  searchCenter,
-  draftPoints,
-  routePoints,
-  segments,
-  previewSegments,
-  trackingPath,
-  activeSegmentPoints,
-  mode,
-  onMapClick,
-}: Props) {
+export function MapView(props: Props) {
+  const {
+    center,
+    userLocation,
+    searchCenter,
+    draftPoints,
+    routePoints,
+    segments,
+    previewSegments,
+    trackingPath,
+    activeSegmentPoints,
+    mode,
+    onMapClick,
+  } = props;
+
   const mapRef = useRef<Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -47,7 +53,7 @@ export function MapView({
 
   const personMarkerRef = useRef<maplibregl.Marker | null>(null);
 
-  // ✅ this forces redraw when style becomes ready
+  // forces redraw after style is truly ready in prod
   const [styleTick, setStyleTick] = useState(0);
 
   useEffect(() => {
@@ -55,7 +61,7 @@ export function MapView({
     onMapClickRef.current = onMapClick;
   }, [mode, onMapClick]);
 
-  // ---------- MAP INIT (ONCE) ----------
+  // ---------- INIT MAP ONCE ----------
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
@@ -79,9 +85,10 @@ export function MapView({
 
     map.addControl(new maplibregl.NavigationControl(), "bottom-right");
 
+    // debug prod errors
     map.on("error", (e) => console.error("MAP ERROR:", e.error));
 
-    // ✅ bump styleTick when style is ready / changes
+    // bump tick when style becomes ready / changes
     map.on("load", () => setStyleTick((t) => t + 1));
     map.on("styledata", () => {
       if (map.isStyleLoaded()) setStyleTick((t) => t + 1);
@@ -98,7 +105,7 @@ export function MapView({
     mapRef.current = map;
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // init once
+  }, []);
 
   // ---------- RECENTER ----------
   useEffect(() => {
@@ -106,14 +113,59 @@ export function MapView({
     mapRef.current.easeTo({ center: [center.lng, center.lat], duration: 500 });
   }, [center]);
 
-  // ---------- HELPERS ----------
-  const setLine = useCallback(
-    (id: string, points: LatLng[], color: string, width = 4, opacity = 1) => {
-      const map = mapRef.current;
-      if (!map || !map.isStyleLoaded()) return;
+  // ---------- HARD REDRAW ALL CUSTOM LAYERS ----------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
 
+    // 1) remove any custom layers/sources we might have added before
+    const removeIfExists = (id: string) => {
+      if (map.getLayer(id)) map.removeLayer(id);
+      if (map.getSource(id)) map.removeSource(id);
+    };
+
+    // known fixed ids
+    const fixedIds = [
+      "draft-line",
+      "route-line",
+      "active-seg",
+      "tracking-line",
+      "search-pin",
+      "route-points",
+      "route-points-circles",
+      "route-points-labels",
+      "user-dot",
+    ];
+    fixedIds.forEach(removeIfExists);
+
+    // preview + segment layers are dynamic prefixes
+    map.getStyle().layers?.forEach((l) => {
+      if (
+        l.id.startsWith("preview-") ||
+        l.id.startsWith("seg-")
+      ) {
+        removeIfExists(l.id);
+      }
+    });
+    Object.keys(map.getStyle().sources).forEach((sid) => {
+      if (
+        sid.startsWith("preview-") ||
+        sid.startsWith("seg-")
+      ) {
+        removeIfExists(sid);
+      }
+    });
+
+    // 2) helpers to add fresh layers
+    const addLine = (
+      id: string,
+      points: LatLng[],
+      color: string,
+      width = 4,
+      opacity = 1
+    ) => {
+      if (points.length < 2) return;
       const coords = points.map((p) => [p.lng, p.lat]);
-      const existing = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
 
       const data: GeoJSON.Feature<GeoJSON.LineString> = {
         type: "Feature",
@@ -121,38 +173,21 @@ export function MapView({
         properties: {},
       };
 
-      if (existing) {
-        existing.setData(data);
-      } else {
-        if (!map.getSource(id)) map.addSource(id, { type: "geojson", data });
-        if (!map.getLayer(id)) {
-          map.addLayer({
-            id,
-            type: "line",
-            source: id,
-            paint: {
-              "line-color": color,
-              "line-width": width,
-              "line-opacity": opacity,
-            },
-          });
-        }
-      }
-    },
-    []
-  );
+      map.addSource(id, { type: "geojson", data });
+      map.addLayer({
+        id,
+        type: "line",
+        source: id,
+        paint: {
+          "line-color": color,
+          "line-width": width,
+          "line-opacity": opacity,
+        },
+      });
+    };
 
-  const removeLayerAndSource = useCallback((id: string) => {
-    const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-    if (map.getLayer(id)) map.removeLayer(id);
-    if (map.getSource(id)) map.removeSource(id);
-  }, []);
-
-  const setPointsLayer = useCallback(
-    (id: string, points: LatLng[], color = "#111827") => {
-      const map = mapRef.current;
-      if (!map || !map.isStyleLoaded()) return;
+    const addPoints = (id: string, points: LatLng[], color = "#111827") => {
+      if (points.length === 0) return;
 
       const features: GeoJSON.Feature<GeoJSON.Point>[] = points.map((p, i) => ({
         type: "Feature",
@@ -165,249 +200,119 @@ export function MapView({
         features,
       };
 
-      const src = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
-
-      if (src) {
-        src.setData(data);
-      } else {
-        map.addSource(id, { type: "geojson", data });
-
-        map.addLayer({
-          id: `${id}-circles`,
-          type: "circle",
-          source: id,
-          paint: {
-            "circle-radius": 6,
-            "circle-color": color,
-            "circle-stroke-color": "#ffffff",
-            "circle-stroke-width": 2,
-          },
-        });
-
-        map.addLayer({
-          id: `${id}-labels`,
-          type: "symbol",
-          source: id,
-          layout: {
-            "text-field": ["get", "index"],
-            "text-size": 12,
-            "text-offset": [0, -1.2],
-            "text-anchor": "bottom",
-          },
-          paint: {
-            "text-color": "#111827",
-            "text-halo-color": "#ffffff",
-            "text-halo-width": 1.5,
-          },
-        });
-      }
-    },
-    []
-  );
-
-  const removePointsLayer = useCallback((id: string) => {
-    const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-    const layers = [`${id}-labels`, `${id}-circles`];
-    layers.forEach((l) => map.getLayer(l) && map.removeLayer(l));
-    if (map.getSource(id)) map.removeSource(id);
-  }, []);
-
-  // ---------- DRAFT LINE ----------
-  useEffect(() => {
-    if (mode === "drawing" && draftPoints.length > 1) {
-      setLine("draft-line", draftPoints, "#2563eb", 4, 1);
-    } else {
-      removeLayerAndSource("draft-line");
-    }
-  }, [draftPoints, mode, styleTick, setLine, removeLayerAndSource]);
-
-  // ---------- FULL ROUTE BASE ----------
-  useEffect(() => {
-    if (!routePoints) return;
-    setLine("route-line", routePoints, "#a855f7", 5, 0.7);
-  }, [routePoints, styleTick, setLine]);
-
-  // ---------- NUMBERED POINTS ----------
-  useEffect(() => {
-    const pts = mode === "drawing" ? draftPoints : routePoints ?? [];
-    const showLabels =
-      mode === "splitting" || mode === "segments" || mode === "saved";
-
-    if (pts.length > 0) {
-      setPointsLayer("route-points", pts, "#111827");
-      if (mapRef.current?.getLayer("route-points-labels")) {
-        mapRef.current.setLayoutProperty(
-          "route-points-labels",
-          "visibility",
-          showLabels ? "visible" : "none"
-        );
-      }
-    } else {
-      removePointsLayer("route-points");
-    }
-  }, [
-    draftPoints,
-    routePoints,
-    mode,
-    styleTick,
-    setPointsLayer,
-    removePointsLayer,
-  ]);
-
-  // ---------- PREVIEW SEGMENTS ----------
-  useEffect(() => {
-    if (!routePoints) return;
-
-    if (mode !== "splitting") {
-      previewSegments.forEach((ps) =>
-        removeLayerAndSource(`preview-${ps.id}`)
-      );
-      return;
-    }
-
-    previewSegments.forEach((ps) => {
-      const pts = routePoints.slice(ps.startIndex, ps.endIndex + 1);
-      setLine(`preview-${ps.id}`, pts, ps.color, 6, 0.95);
-    });
-  }, [
-    previewSegments,
-    routePoints,
-    mode,
-    styleTick,
-    setLine,
-    removeLayerAndSource,
-  ]);
-
-  // ---------- FINAL SEGMENTS ----------
-  useEffect(() => {
-    if (!routePoints) return;
-
-    segments.forEach((s, idx) => {
-      const pts =
-        s.status === "completed" && s.completedPath && s.completedPath.length > 1
-          ? s.completedPath
-          : routePoints.slice(s.startIndex, s.endIndex + 1);
-
-      const color =
-        s.status === "completed"
-          ? "#22c55e"
-          : s.status === "assigned"
-          ? idx % 2
-            ? "#f59e0b"
-            : "#ef4444"
-          : "#9ca3af";
-
-      setLine(`seg-${s.id}`, pts, color, 5, 0.95);
-    });
-  }, [segments, routePoints, styleTick, setLine]);
-
-  // ---------- ACTIVE SEGMENT HIGHLIGHT ----------
-  useEffect(() => {
-    if (mode === "tracking" && activeSegmentPoints.length > 1) {
-      setLine("active-seg", activeSegmentPoints, "#a855f7", 8, 1);
-    } else {
-      removeLayerAndSource("active-seg");
-    }
-  }, [
-    activeSegmentPoints,
-    mode,
-    styleTick,
-    setLine,
-    removeLayerAndSource,
-  ]);
-
-  // ---------- LIVE TRACKING PATH ----------
-  useEffect(() => {
-    if (mode === "tracking" && trackingPath.length > 1) {
-      setLine("tracking-line", trackingPath, "#2563eb", 4, 1);
-    } else {
-      removeLayerAndSource("tracking-line");
-    }
-  }, [trackingPath, mode, styleTick, setLine, removeLayerAndSource]);
-
-  // ---------- USER ICON ----------
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !map.isStyleLoaded() || !userLocation) return;
-
-    if (map.getLayer("user-dot")) {
-      map.removeLayer("user-dot");
-      map.removeSource("user-dot");
-    }
-
-    if (mode === "tracking") {
-      if (!personMarkerRef.current) {
-        const el = document.createElement("div");
-        el.textContent = "🧍";
-        el.style.fontSize = "22px";
-        el.style.transform = "translate(-50%, -50%)";
-
-        personMarkerRef.current = new maplibregl.Marker({ element: el })
-          .setLngLat([userLocation.lng, userLocation.lat])
-          .addTo(map);
-      } else {
-        personMarkerRef.current.setLngLat([
-          userLocation.lng,
-          userLocation.lat,
-        ]);
-      }
-    } else {
-      if (personMarkerRef.current) {
-        personMarkerRef.current.remove();
-        personMarkerRef.current = null;
-      }
-
-      const data: GeoJSON.Feature<GeoJSON.Point> = {
-        type: "Feature",
-        geometry: {
-          type: "Point",
-          coordinates: [userLocation.lng, userLocation.lat],
-        },
-        properties: {},
-      };
-
-      map.addSource("user-dot", { type: "geojson", data });
-      map.addLayer({
-        id: "user-dot",
-        type: "circle",
-        source: "user-dot",
-        paint: { "circle-radius": 6, "circle-color": "#111827" },
-      });
-    }
-  }, [userLocation, mode, styleTick]);
-
-  // ---------- SEARCH PIN ----------
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-
-    const id = "search-pin";
-
-    if (!searchCenter) {
-      if (map.getLayer(id)) map.removeLayer(id);
-      if (map.getSource(id)) map.removeSource(id);
-      return;
-    }
-
-    const data: GeoJSON.Feature<GeoJSON.Point> = {
-      type: "Feature",
-      geometry: {
-        type: "Point",
-        coordinates: [searchCenter.lng, searchCenter.lat],
-      },
-      properties: {},
-    };
-
-    const src = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
-
-    if (src) src.setData(data);
-    else {
       map.addSource(id, { type: "geojson", data });
+
       map.addLayer({
-        id,
+        id: `${id}-circles`,
         type: "circle",
         source: id,
+        paint: {
+          "circle-radius": 6,
+          "circle-color": color,
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2,
+        },
+      });
+
+      map.addLayer({
+        id: `${id}-labels`,
+        type: "symbol",
+        source: id,
+        layout: {
+          "text-field": ["get", "index"],
+          "text-size": 12,
+          "text-offset": [0, -1.2],
+          "text-anchor": "bottom",
+        },
+        paint: {
+          "text-color": "#111827",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1.5,
+        },
+      });
+    };
+
+    // 3) redraw in correct order
+
+    // draft line
+    if (mode === "drawing") {
+      addLine("draft-line", draftPoints, "#2563eb", 4, 1);
+    }
+
+    // base route
+    if (routePoints) {
+      addLine("route-line", routePoints, "#a855f7", 5, 0.7);
+    }
+
+    // numbered points when relevant
+    const ptsToLabel =
+      mode === "drawing" ? draftPoints : routePoints ?? [];
+    const showLabels =
+      mode === "splitting" || mode === "segments" || mode === "saved";
+    if (showLabels || mode === "drawing") {
+      addPoints("route-points", ptsToLabel, "#111827");
+      if (!showLabels) {
+        map.setLayoutProperty("route-points-labels", "visibility", "none");
+      }
+    }
+
+    // preview segments while splitting
+    if (mode === "splitting" && routePoints) {
+      previewSegments.forEach((ps) => {
+        const segPts = routePoints.slice(ps.startIndex, ps.endIndex + 1);
+        addLine(`preview-${ps.id}`, segPts, ps.color, 6, 0.95);
+      });
+    }
+
+    // final segments
+    if (routePoints) {
+      segments.forEach((s, idx) => {
+        const segPts =
+          s.status === "completed" && s.completedPath && s.completedPath.length > 1
+            ? s.completedPath
+            : routePoints.slice(s.startIndex, s.endIndex + 1);
+
+        const color =
+          s.status === "completed"
+            ? "#22c55e"
+            : s.status === "assigned"
+            ? idx % 2
+              ? "#f59e0b"
+              : "#ef4444"
+            : "#9ca3af";
+
+        addLine(`seg-${s.id}`, segPts, color, 5, 0.95);
+      });
+    }
+
+    // active segment highlight in tracking
+    if (mode === "tracking") {
+      addLine("active-seg", activeSegmentPoints, "#a855f7", 8, 1);
+    }
+
+    // live tracking overlay
+    if (mode === "tracking") {
+      addLine("tracking-line", trackingPath, "#2563eb", 4, 1);
+    }
+
+    // search pin
+    if (searchCenter) {
+      map.addSource("search-pin", {
+        type: "geojson",
+        data: {
+          type: "Feature",
+          geometry: {
+            type: "Point",
+            coordinates: [searchCenter.lng, searchCenter.lat],
+          },
+          properties: {},
+        },
+      });
+
+      map.addLayer({
+        id: "search-pin",
+        type: "circle",
+        source: "search-pin",
         paint: {
           "circle-radius": 8,
           "circle-color": "#ef4444",
@@ -416,7 +321,66 @@ export function MapView({
         },
       });
     }
-  }, [searchCenter, styleTick]);
+
+    // user icon / dot
+    if (userLocation) {
+      if (mode === "tracking") {
+        if (!personMarkerRef.current) {
+          const el = document.createElement("div");
+          el.textContent = "🧍";
+          el.style.fontSize = "22px";
+          el.style.transform = "translate(-50%, -50%)";
+
+          personMarkerRef.current = new maplibregl.Marker({ element: el })
+            .setLngLat([userLocation.lng, userLocation.lat])
+            .addTo(map);
+        } else {
+          personMarkerRef.current.setLngLat([
+            userLocation.lng,
+            userLocation.lat,
+          ]);
+        }
+      } else {
+        if (personMarkerRef.current) {
+          personMarkerRef.current.remove();
+          personMarkerRef.current = null;
+        }
+
+        map.addSource("user-dot", {
+          type: "geojson",
+          data: {
+            type: "Feature",
+            geometry: {
+              type: "Point",
+              coordinates: [userLocation.lng, userLocation.lat],
+            },
+            properties: {},
+          },
+        });
+
+        map.addLayer({
+          id: "user-dot",
+          type: "circle",
+          source: "user-dot",
+          paint: {
+            "circle-radius": 6,
+            "circle-color": "#111827",
+          },
+        });
+      }
+    }
+  }, [
+    styleTick,
+    mode,
+    draftPoints,
+    routePoints,
+    previewSegments,
+    segments,
+    activeSegmentPoints,
+    trackingPath,
+    searchCenter,
+    userLocation,
+  ]);
 
   return <div ref={containerRef} className="w-full h-full z-0" />;
 }
