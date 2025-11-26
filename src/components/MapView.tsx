@@ -1,5 +1,5 @@
 // src/components/MapView.tsx
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { LatLng, Segment } from "../state/types.ts";
@@ -42,12 +42,13 @@ export function MapView({
   const mapRef = useRef<Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // keep latest mode/callback for click without re-binding
   const modeRef = useRef<Step>(mode);
   const onMapClickRef = useRef<Props["onMapClick"]>(onMapClick);
 
-  // person marker for tracking
   const personMarkerRef = useRef<maplibregl.Marker | null>(null);
+
+  // ✅ this forces redraw when style becomes ready
+  const [styleTick, setStyleTick] = useState(0);
 
   useEffect(() => {
     modeRef.current = mode;
@@ -78,8 +79,13 @@ export function MapView({
 
     map.addControl(new maplibregl.NavigationControl(), "bottom-right");
 
-    // helpful prod debugging (safe to leave)
     map.on("error", (e) => console.error("MAP ERROR:", e.error));
+
+    // ✅ bump styleTick when style is ready / changes
+    map.on("load", () => setStyleTick((t) => t + 1));
+    map.on("styledata", () => {
+      if (map.isStyleLoaded()) setStyleTick((t) => t + 1);
+    });
 
     map.on("click", (e) => {
       const m = modeRef.current;
@@ -92,7 +98,7 @@ export function MapView({
     mapRef.current = map;
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // init once on purpose
+  }, []); // init once
 
   // ---------- RECENTER ----------
   useEffect(() => {
@@ -100,7 +106,7 @@ export function MapView({
     mapRef.current.easeTo({ center: [center.lng, center.lat], duration: 500 });
   }, [center]);
 
-  // ---------- HELPERS (gated by isStyleLoaded) ----------
+  // ---------- HELPERS ----------
   const setLine = useCallback(
     (id: string, points: LatLng[], color: string, width = 4, opacity = 1) => {
       const map = mapRef.current;
@@ -214,13 +220,13 @@ export function MapView({
     } else {
       removeLayerAndSource("draft-line");
     }
-  }, [draftPoints, mode, setLine, removeLayerAndSource]);
+  }, [draftPoints, mode, styleTick, setLine, removeLayerAndSource]);
 
   // ---------- FULL ROUTE BASE ----------
   useEffect(() => {
     if (!routePoints) return;
     setLine("route-line", routePoints, "#a855f7", 5, 0.7);
-  }, [routePoints, setLine]);
+  }, [routePoints, styleTick, setLine]);
 
   // ---------- NUMBERED POINTS ----------
   useEffect(() => {
@@ -240,7 +246,14 @@ export function MapView({
     } else {
       removePointsLayer("route-points");
     }
-  }, [draftPoints, routePoints, mode, setPointsLayer, removePointsLayer]);
+  }, [
+    draftPoints,
+    routePoints,
+    mode,
+    styleTick,
+    setPointsLayer,
+    removePointsLayer,
+  ]);
 
   // ---------- PREVIEW SEGMENTS ----------
   useEffect(() => {
@@ -261,6 +274,7 @@ export function MapView({
     previewSegments,
     routePoints,
     mode,
+    styleTick,
     setLine,
     removeLayerAndSource,
   ]);
@@ -277,7 +291,7 @@ export function MapView({
 
       const color =
         s.status === "completed"
-          ? "#22c55e" // green for completed
+          ? "#22c55e"
           : s.status === "assigned"
           ? idx % 2
             ? "#f59e0b"
@@ -286,7 +300,7 @@ export function MapView({
 
       setLine(`seg-${s.id}`, pts, color, 5, 0.95);
     });
-  }, [segments, routePoints, setLine]);
+  }, [segments, routePoints, styleTick, setLine]);
 
   // ---------- ACTIVE SEGMENT HIGHLIGHT ----------
   useEffect(() => {
@@ -295,7 +309,13 @@ export function MapView({
     } else {
       removeLayerAndSource("active-seg");
     }
-  }, [activeSegmentPoints, mode, setLine, removeLayerAndSource]);
+  }, [
+    activeSegmentPoints,
+    mode,
+    styleTick,
+    setLine,
+    removeLayerAndSource,
+  ]);
 
   // ---------- LIVE TRACKING PATH ----------
   useEffect(() => {
@@ -304,7 +324,7 @@ export function MapView({
     } else {
       removeLayerAndSource("tracking-line");
     }
-  }, [trackingPath, mode, setLine, removeLayerAndSource]);
+  }, [trackingPath, mode, styleTick, setLine, removeLayerAndSource]);
 
   // ---------- USER ICON ----------
   useEffect(() => {
@@ -355,7 +375,7 @@ export function MapView({
         paint: { "circle-radius": 6, "circle-color": "#111827" },
       });
     }
-  }, [userLocation, mode]);
+  }, [userLocation, mode, styleTick]);
 
   // ---------- SEARCH PIN ----------
   useEffect(() => {
@@ -396,7 +416,7 @@ export function MapView({
         },
       });
     }
-  }, [searchCenter]);
+  }, [searchCenter, styleTick]);
 
   return <div ref={containerRef} className="w-full h-full z-0" />;
 }
