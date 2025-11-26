@@ -1,5 +1,5 @@
 // src/components/MapView.tsx
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { LatLng, Segment } from "../state/types.ts";
@@ -41,10 +41,12 @@ export function MapView({
 }: Props) {
   const mapRef = useRef<Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [mapLoaded, setMapLoaded] = useState(false);
 
+  // keep latest mode/callback for click without re-binding
   const modeRef = useRef<Step>(mode);
   const onMapClickRef = useRef<Props["onMapClick"]>(onMapClick);
+
+  // person marker for tracking
   const personMarkerRef = useRef<maplibregl.Marker | null>(null);
 
   useEffect(() => {
@@ -76,7 +78,8 @@ export function MapView({
 
     map.addControl(new maplibregl.NavigationControl(), "bottom-right");
 
-    map.once("load", () => setMapLoaded(true));
+    // helpful prod debugging (safe to leave)
+    map.on("error", (e) => console.error("MAP ERROR:", e.error));
 
     map.on("click", (e) => {
       const m = modeRef.current;
@@ -97,11 +100,11 @@ export function MapView({
     mapRef.current.easeTo({ center: [center.lng, center.lat], duration: 500 });
   }, [center]);
 
-  // ---------- HELPERS (memoized) ----------
+  // ---------- HELPERS (gated by isStyleLoaded) ----------
   const setLine = useCallback(
     (id: string, points: LatLng[], color: string, width = 4, opacity = 1) => {
       const map = mapRef.current;
-      if (!map || !mapLoaded) return;
+      if (!map || !map.isStyleLoaded()) return;
 
       const coords = points.map((p) => [p.lng, p.lat]);
       const existing = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
@@ -115,9 +118,7 @@ export function MapView({
       if (existing) {
         existing.setData(data);
       } else {
-        if (!map.getSource(id)) {
-          map.addSource(id, { type: "geojson", data });
-        }
+        if (!map.getSource(id)) map.addSource(id, { type: "geojson", data });
         if (!map.getLayer(id)) {
           map.addLayer({
             id,
@@ -132,23 +133,20 @@ export function MapView({
         }
       }
     },
-    [mapLoaded]
+    []
   );
 
-  const removeLayerAndSource = useCallback(
-    (id: string) => {
-      const map = mapRef.current;
-      if (!map || !mapLoaded) return;
-      if (map.getLayer(id)) map.removeLayer(id);
-      if (map.getSource(id)) map.removeSource(id);
-    },
-    [mapLoaded]
-  );
+  const removeLayerAndSource = useCallback((id: string) => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+    if (map.getLayer(id)) map.removeLayer(id);
+    if (map.getSource(id)) map.removeSource(id);
+  }, []);
 
   const setPointsLayer = useCallback(
     (id: string, points: LatLng[], color = "#111827") => {
       const map = mapRef.current;
-      if (!map || !mapLoaded) return;
+      if (!map || !map.isStyleLoaded()) return;
 
       const features: GeoJSON.Feature<GeoJSON.Point>[] = points.map((p, i) => ({
         type: "Feature",
@@ -198,41 +196,34 @@ export function MapView({
         });
       }
     },
-    [mapLoaded]
+    []
   );
 
-  const removePointsLayer = useCallback(
-    (id: string) => {
-      const map = mapRef.current;
-      if (!map || !mapLoaded) return;
-      const layers = [`${id}-labels`, `${id}-circles`];
-      layers.forEach((l) => map.getLayer(l) && map.removeLayer(l));
-      if (map.getSource(id)) map.removeSource(id);
-    },
-    [mapLoaded]
-  );
+  const removePointsLayer = useCallback((id: string) => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+    const layers = [`${id}-labels`, `${id}-circles`];
+    layers.forEach((l) => map.getLayer(l) && map.removeLayer(l));
+    if (map.getSource(id)) map.removeSource(id);
+  }, []);
 
   // ---------- DRAFT LINE ----------
   useEffect(() => {
-    if (!mapLoaded) return;
-
     if (mode === "drawing" && draftPoints.length > 1) {
       setLine("draft-line", draftPoints, "#2563eb", 4, 1);
     } else {
       removeLayerAndSource("draft-line");
     }
-  }, [draftPoints, mode, mapLoaded, setLine, removeLayerAndSource]);
+  }, [draftPoints, mode, setLine, removeLayerAndSource]);
 
   // ---------- FULL ROUTE BASE ----------
   useEffect(() => {
-    if (!mapLoaded || !routePoints) return;
+    if (!routePoints) return;
     setLine("route-line", routePoints, "#a855f7", 5, 0.7);
-  }, [routePoints, mapLoaded, setLine]);
+  }, [routePoints, setLine]);
 
   // ---------- NUMBERED POINTS ----------
   useEffect(() => {
-    if (!mapLoaded) return;
-
     const pts = mode === "drawing" ? draftPoints : routePoints ?? [];
     const showLabels =
       mode === "splitting" || mode === "segments" || mode === "saved";
@@ -249,18 +240,11 @@ export function MapView({
     } else {
       removePointsLayer("route-points");
     }
-  }, [
-    draftPoints,
-    routePoints,
-    mode,
-    mapLoaded,
-    setPointsLayer,
-    removePointsLayer,
-  ]);
+  }, [draftPoints, routePoints, mode, setPointsLayer, removePointsLayer]);
 
   // ---------- PREVIEW SEGMENTS ----------
   useEffect(() => {
-    if (!mapLoaded || !routePoints) return;
+    if (!routePoints) return;
 
     if (mode !== "splitting") {
       previewSegments.forEach((ps) =>
@@ -277,14 +261,13 @@ export function MapView({
     previewSegments,
     routePoints,
     mode,
-    mapLoaded,
     setLine,
     removeLayerAndSource,
   ]);
 
   // ---------- FINAL SEGMENTS ----------
   useEffect(() => {
-    if (!mapLoaded || !routePoints) return;
+    if (!routePoints) return;
 
     segments.forEach((s, idx) => {
       const pts =
@@ -294,7 +277,7 @@ export function MapView({
 
       const color =
         s.status === "completed"
-          ? "#22c55e"
+          ? "#22c55e" // green for completed
           : s.status === "assigned"
           ? idx % 2
             ? "#f59e0b"
@@ -303,40 +286,30 @@ export function MapView({
 
       setLine(`seg-${s.id}`, pts, color, 5, 0.95);
     });
-  }, [segments, routePoints, mapLoaded, setLine]);
+  }, [segments, routePoints, setLine]);
 
   // ---------- ACTIVE SEGMENT HIGHLIGHT ----------
   useEffect(() => {
-    if (!mapLoaded) return;
-
     if (mode === "tracking" && activeSegmentPoints.length > 1) {
       setLine("active-seg", activeSegmentPoints, "#a855f7", 8, 1);
     } else {
       removeLayerAndSource("active-seg");
     }
-  }, [
-    activeSegmentPoints,
-    mode,
-    mapLoaded,
-    setLine,
-    removeLayerAndSource,
-  ]);
+  }, [activeSegmentPoints, mode, setLine, removeLayerAndSource]);
 
   // ---------- LIVE TRACKING PATH ----------
   useEffect(() => {
-    if (!mapLoaded) return;
-
     if (mode === "tracking" && trackingPath.length > 1) {
       setLine("tracking-line", trackingPath, "#2563eb", 4, 1);
     } else {
       removeLayerAndSource("tracking-line");
     }
-  }, [trackingPath, mode, mapLoaded, setLine, removeLayerAndSource]);
+  }, [trackingPath, mode, setLine, removeLayerAndSource]);
 
   // ---------- USER ICON ----------
   useEffect(() => {
     const map = mapRef.current;
-    if (!mapLoaded || !map || !userLocation) return;
+    if (!map || !map.isStyleLoaded() || !userLocation) return;
 
     if (map.getLayer("user-dot")) {
       map.removeLayer("user-dot");
@@ -382,12 +355,12 @@ export function MapView({
         paint: { "circle-radius": 6, "circle-color": "#111827" },
       });
     }
-  }, [userLocation, mode, mapLoaded]);
+  }, [userLocation, mode]);
 
   // ---------- SEARCH PIN ----------
   useEffect(() => {
     const map = mapRef.current;
-    if (!mapLoaded || !map) return;
+    if (!map || !map.isStyleLoaded()) return;
 
     const id = "search-pin";
 
@@ -423,7 +396,7 @@ export function MapView({
         },
       });
     }
-  }, [searchCenter, mapLoaded]);
+  }, [searchCenter]);
 
   return <div ref={containerRef} className="w-full h-full z-0" />;
 }
