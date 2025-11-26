@@ -1,5 +1,5 @@
 // src/components/MapView.tsx
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import maplibregl, { Map } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { LatLng, Segment } from "../state/types.ts";
@@ -51,7 +51,7 @@ export function MapView({
 
   const personMarkerRef = useRef<maplibregl.Marker | null>(null);
 
-  // triggers redraw when style changes
+  // tick when style changes so we re-attempt drawing in prod
   const [styleTick, setStyleTick] = useState(0);
 
   useEffect(() => {
@@ -85,7 +85,6 @@ export function MapView({
 
     map.on("error", (e) => console.error("MAP ERROR:", e.error));
 
-    // bump tick when style becomes ready / changes
     map.on("load", () => setStyleTick((t) => t + 1));
     map.on("styledata", () => setStyleTick((t) => t + 1));
 
@@ -108,71 +107,52 @@ export function MapView({
     mapRef.current.easeTo({ center: [center.lng, center.lat], duration: 500 });
   }, [center]);
 
-  // ---------- DRAW OVERLAYS (HARD REDRAW) ----------
-  const drawOverlays = useCallback(() => {
-    const map = mapRef.current;
-    if (!map) return;
+  // ---------- UPSERT HELPERS ----------
+  const upsertLine = useCallback(
+    (id: string, points: LatLng[], color: string, width = 4, opacity = 1) => {
+      const map = mapRef.current;
+      if (!map || !map.isStyleLoaded() || points.length < 2) return;
 
-    // remove any custom layers/sources before redraw
-    const removeIfExists = (id: string) => {
-      if (map.getLayer(id)) map.removeLayer(id);
-      if (map.getSource(id)) map.removeSource(id);
-    };
-
-    const fixedIds = [
-      "draft-line",
-      "route-line",
-      "active-seg",
-      "tracking-line",
-      "search-pin",
-      "route-points",
-      "route-points-circles",
-      "route-points-labels",
-      "user-dot",
-    ];
-    fixedIds.forEach(removeIfExists);
-
-    // dynamic prefixes
-    map.getStyle().layers?.forEach((l) => {
-      if (l.id.startsWith("preview-") || l.id.startsWith("seg-")) {
-        removeIfExists(l.id);
-      }
-    });
-    Object.keys(map.getStyle().sources).forEach((sid) => {
-      if (sid.startsWith("preview-") || sid.startsWith("seg-")) {
-        removeIfExists(sid);
-      }
-    });
-
-    const addLine = (
-      id: string,
-      points: LatLng[],
-      color: string,
-      width = 4,
-      opacity = 1
-    ) => {
-      if (points.length < 2) return;
       const coords = points.map((p) => [p.lng, p.lat]);
+
       const data: GeoJSON.Feature<GeoJSON.LineString> = {
         type: "Feature",
         geometry: { type: "LineString", coordinates: coords },
         properties: {},
       };
-      map.addSource(id, { type: "geojson", data });
-      map.addLayer({
-        id,
-        type: "line",
-        source: id,
-        paint: {
-          "line-color": color,
-          "line-width": width,
-          "line-opacity": opacity,
-        },
-      });
-    };
 
-    const addPoints = (id: string, points: LatLng[], color = "#111827") => {
-      if (points.length === 0) return;
+      const src = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
+      if (src) {
+        src.setData(data);
+      } else {
+        map.addSource(id, { type: "geojson", data });
+      }
+
+      if (!map.getLayer(id)) {
+        map.addLayer({
+          id,
+          type: "line",
+          source: id,
+          paint: {
+            "line-color": color,
+            "line-width": width,
+            "line-opacity": opacity,
+          },
+        });
+      } else {
+        // keep paint updated if needed
+        map.setPaintProperty(id, "line-color", color);
+        map.setPaintProperty(id, "line-width", width);
+        map.setPaintProperty(id, "line-opacity", opacity);
+      }
+    },
+    []
+  );
+
+  const upsertPoints = useCallback(
+    (id: string, points: LatLng[], color = "#111827") => {
+      const map = mapRef.current;
+      if (!map || !map.isStyleLoaded() || points.length === 0) return;
 
       const features: GeoJSON.Feature<GeoJSON.Point>[] = points.map((p, i) => ({
         type: "Feature",
@@ -185,56 +165,82 @@ export function MapView({
         features,
       };
 
-      map.addSource(id, { type: "geojson", data });
+      const src = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
+      if (src) {
+        src.setData(data);
+      } else {
+        map.addSource(id, { type: "geojson", data });
+      }
 
-      map.addLayer({
-        id: `${id}-circles`,
-        type: "circle",
-        source: id,
-        paint: {
-          "circle-radius": 6,
-          "circle-color": color,
-          "circle-stroke-color": "#ffffff",
-          "circle-stroke-width": 2,
-        },
-      });
+      const circlesId = `${id}-circles`;
+      const labelsId = `${id}-labels`;
 
-      map.addLayer({
-        id: `${id}-labels`,
-        type: "symbol",
-        source: id,
-        layout: {
-          "text-field": ["get", "index"],
-          "text-size": 12,
-          "text-offset": [0, -1.2],
-          "text-anchor": "bottom",
-        },
-        paint: {
-          "text-color": "#111827",
-          "text-halo-color": "#ffffff",
-          "text-halo-width": 1.5,
-        },
-      });
-    };
+      if (!map.getLayer(circlesId)) {
+        map.addLayer({
+          id: circlesId,
+          type: "circle",
+          source: id,
+          paint: {
+            "circle-radius": 6,
+            "circle-color": color,
+            "circle-stroke-color": "#ffffff",
+            "circle-stroke-width": 2,
+          },
+        });
+      } else {
+        map.setPaintProperty(circlesId, "circle-color", color);
+      }
 
-    // draft line
+      if (!map.getLayer(labelsId)) {
+        map.addLayer({
+          id: labelsId,
+          type: "symbol",
+          source: id,
+          layout: {
+            "text-field": ["get", "index"],
+            "text-size": 12,
+            "text-offset": [0, -1.2],
+            "text-anchor": "bottom",
+          },
+          paint: {
+            "text-color": "#111827",
+            "text-halo-color": "#ffffff",
+            "text-halo-width": 1.5,
+          },
+        });
+      }
+    },
+    []
+  );
+
+  // ---------- REDRAW ALL OVERLAYS (UPSERT) ----------
+  const redrawAll = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+
+    // draft
     if (mode === "drawing") {
-      addLine("draft-line", draftPoints, "#2563eb", 4, 1);
+      upsertLine("draft-line", draftPoints, "#2563eb", 4, 1);
     }
 
     // base route
     if (routePoints) {
-      addLine("route-line", routePoints, "#a855f7", 5, 0.7);
+      upsertLine("route-line", routePoints, "#a855f7", 5, 0.7);
     }
 
-    // numbered points
-    const ptsToLabel = mode === "drawing" ? draftPoints : routePoints ?? [];
+    // points
+    const ptsToLabel =
+      mode === "drawing" ? draftPoints : routePoints ?? [];
     const showLabels =
       mode === "splitting" || mode === "segments" || mode === "saved";
-    if (showLabels || mode === "drawing") {
-      addPoints("route-points", ptsToLabel, "#111827");
-      if (!showLabels && map.getLayer("route-points-labels")) {
-        map.setLayoutProperty("route-points-labels", "visibility", "none");
+    if (ptsToLabel.length) {
+      upsertPoints("route-points", ptsToLabel, "#111827");
+      if (map.getLayer("route-points-labels")) {
+        map.setLayoutProperty(
+          "route-points-labels",
+          "visibility",
+          showLabels ? "visible" : "none"
+        );
       }
     }
 
@@ -242,7 +248,7 @@ export function MapView({
     if (mode === "splitting" && routePoints) {
       previewSegments.forEach((ps) => {
         const segPts = routePoints.slice(ps.startIndex, ps.endIndex + 1);
-        addLine(`preview-${ps.id}`, segPts, ps.color, 6, 0.95);
+        upsertLine(`preview-${ps.id}`, segPts, ps.color, 6, 0.95);
       });
     }
 
@@ -265,45 +271,29 @@ export function MapView({
               : "#ef4444"
             : "#9ca3af";
 
-        addLine(`seg-${s.id}`, segPts, color, 5, 0.95);
+        upsertLine(`seg-${s.id}`, segPts, color, 5, 0.95);
       });
     }
 
     // active segment highlight
     if (mode === "tracking") {
-      addLine("active-seg", activeSegmentPoints, "#a855f7", 8, 1);
+      upsertLine(
+        "active-seg",
+        activeSegmentPoints,
+        "#a855f7",
+        8,
+        1
+      );
     }
 
     // tracking overlay
     if (mode === "tracking") {
-      addLine("tracking-line", trackingPath, "#2563eb", 4, 1);
+      upsertLine("tracking-line", trackingPath, "#2563eb", 4, 1);
     }
 
     // search pin
     if (searchCenter) {
-      map.addSource("search-pin", {
-        type: "geojson",
-        data: {
-          type: "Feature",
-          geometry: {
-            type: "Point",
-            coordinates: [searchCenter.lng, searchCenter.lat],
-          },
-          properties: {},
-        },
-      });
-
-      map.addLayer({
-        id: "search-pin",
-        type: "circle",
-        source: "search-pin",
-        paint: {
-          "circle-radius": 8,
-          "circle-color": "#ef4444",
-          "circle-stroke-color": "#ffffff",
-          "circle-stroke-width": 2,
-        },
-      });
+      upsertPoints("search-pin", [searchCenter], "#ef4444");
     }
 
     // user icon / dot
@@ -314,6 +304,7 @@ export function MapView({
           el.textContent = "🧍";
           el.style.fontSize = "22px";
           el.style.transform = "translate(-50%, -50%)";
+
           personMarkerRef.current = new maplibregl.Marker({ element: el })
             .setLngLat([userLocation.lng, userLocation.lat])
             .addTo(map);
@@ -328,28 +319,7 @@ export function MapView({
           personMarkerRef.current.remove();
           personMarkerRef.current = null;
         }
-
-        map.addSource("user-dot", {
-          type: "geojson",
-          data: {
-            type: "Feature",
-            geometry: {
-              type: "Point",
-              coordinates: [userLocation.lng, userLocation.lat],
-            },
-            properties: {},
-          },
-        });
-
-        map.addLayer({
-          id: "user-dot",
-          type: "circle",
-          source: "user-dot",
-          paint: {
-            "circle-radius": 6,
-            "circle-color": "#111827",
-          },
-        });
+        upsertPoints("user-dot", [userLocation], "#111827");
       }
     }
   }, [
@@ -362,9 +332,11 @@ export function MapView({
     trackingPath,
     searchCenter,
     userLocation,
+    upsertLine,
+    upsertPoints,
   ]);
 
-  // ✅ retry until style is ready, THEN draw
+  // ✅ retry until style is ready, then redrawAll
   useEffect(() => {
     let cancelled = false;
 
@@ -373,20 +345,18 @@ export function MapView({
       if (cancelled || !map) return;
 
       if (!map.isStyleLoaded()) {
-        setTimeout(tryDraw, 200); // keep retrying
+        setTimeout(tryDraw, 200);
         return;
       }
 
-      // style ready → hard redraw overlays
-      drawOverlays();
+      redrawAll();
     };
 
     tryDraw();
-
     return () => {
       cancelled = true;
     };
-  }, [styleTick, drawOverlays]);
+  }, [styleTick, redrawAll]);
 
   return <div ref={containerRef} className="w-full h-full z-0" />;
 }
